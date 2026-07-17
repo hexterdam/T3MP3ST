@@ -11,6 +11,8 @@ import { join } from 'path';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import type { LLMProvider, LLMConfig, FallbackEntry, OpsecLevel } from '../types/index.js';
 
+type ApiKeyProvider = 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai' | 'gemini' | 'litellm' | 'deepseek' | 'local';
+
 // =============================================================================
 // CONFIGURATION SCHEMA
 // =============================================================================
@@ -24,6 +26,8 @@ export interface TempestSettings {
     openai?: string;
     xai?: string;
     gemini?: string;
+    deepseek?: string;
+    litellm?: string;
     local?: string;
   };
 
@@ -63,8 +67,20 @@ export interface TempestSettings {
     defaultModel: string;
   };
 
+  // LiteLLM AI gateway proxy — routes to 100+ LLM providers via unified API
+  litellm: {
+    baseUrl: string;
+    defaultModel: string;
+  };
+
   // Google Gemini — native Gemini API via its OpenAI-compatible endpoint
   gemini: {
+    baseUrl: string;
+    defaultModel: string;
+  };
+
+  // DeepSeek — OpenAI-compatible API
+  deepseek: {
     baseUrl: string;
     defaultModel: string;
   };
@@ -132,12 +148,22 @@ const DEFAULT_SETTINGS: TempestSettings = {
     defaultModel: 'grok-build-0.1',
   },
 
+  litellm: {
+    baseUrl: 'http://localhost:4000/v1',
+    defaultModel: 'gpt-4o',
+  },
+
   // Gemini's OpenAI-compatible surface lives under /v1beta/openai. The OpenAIAdapter posts to
   // `${baseUrl}/chat/completions`, so the /openai path segment is REQUIRED here — without it,
   // requests hit /v1beta/chat/completions, which is not a valid Gemini endpoint.
   gemini: {
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     defaultModel: 'gemini-2.5-flash',
+  },
+
+  deepseek: {
+    baseUrl: 'https://api.deepseek.com/v1',
+    defaultModel: 'deepseek-chat',
   },
 
   codex: {
@@ -397,6 +423,16 @@ export const AVAILABLE_MODELS: Record<LLMProvider, ModelInfo[]> = {
       capabilities: ['reasoning', 'code', 'analysis', 'vision', 'fast'],
     },
   ],
+  litellm: [
+    {
+      id: 'gpt-4o',
+      name: 'Any model via LiteLLM proxy (default: gpt-4o)',
+      provider: 'LiteLLM',
+      contextWindow: 128000,
+      maxOutput: 4096,
+      capabilities: ['reasoning', 'code', 'analysis', 'vision', 'tools'],
+    },
+  ],
   codex: [
     {
       id: 'codex-default',
@@ -464,6 +500,24 @@ export const AVAILABLE_MODELS: Record<LLMProvider, ModelInfo[]> = {
       contextWindow: 1000000,
       maxOutput: 8192,
       capabilities: ['reasoning', 'code', 'analysis', 'vision', 'fast', 'tools'],
+    },
+  ],
+  deepseek: [
+    {
+      id: 'deepseek-chat',
+      name: 'DeepSeek V3 (native)',
+      provider: 'DeepSeek',
+      contextWindow: 64000,
+      maxOutput: 8192,
+      capabilities: ['reasoning', 'code', 'analysis', 'tools'],
+    },
+    {
+      id: 'deepseek-reasoner',
+      name: 'DeepSeek R1 (native)',
+      provider: 'DeepSeek',
+      contextWindow: 64000,
+      maxOutput: 8192,
+      capabilities: ['reasoning', 'code', 'analysis', 'complex-tasks'],
     },
   ],
   local: [
@@ -544,7 +598,7 @@ class ConfigManager {
         const envContent = readFileSync(envPath, 'utf-8');
         const lines = envContent.split('\n');
         // Validation variables added
-        const VALID_PROVIDERS = ['openrouter', 'venice', 'anthropic', 'openai', 'xai', 'gemini', 'local'];
+        const VALID_PROVIDERS = ['openrouter', 'venice', 'anthropic', 'openai', 'xai', 'gemini', 'litellm', 'deepseek', 'local'];
 
         for (const line of lines) {
           const trimmed = line.trim();
@@ -604,7 +658,7 @@ class ConfigManager {
   /**
    * Set an API key for a provider
    */
-  setApiKey(provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai' | 'gemini' | 'local', key: string): void {
+  setApiKey(provider: ApiKeyProvider, key: string): void {
     const apiKeys = this.config.get('apiKeys');
     apiKeys[provider] = key;
     this.config.set('apiKeys', apiKeys);
@@ -613,7 +667,7 @@ class ConfigManager {
   /**
    * Get an API key for a provider
    */
-  getApiKey(provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai' | 'gemini' | 'local'): string | undefined {
+  getApiKey(provider: ApiKeyProvider): string | undefined {
     // First check environment variables (highest priority)
     // local provider: a self-hosted/OpenAI-compatible server MAY require a bearer
     // (Zhipu/z.ai, Together, etc.) — accept TEMPEST_LOCAL_API_KEY or provider-specific vars.
@@ -629,6 +683,8 @@ class ConfigManager {
       openai: 'OPENAI_API_KEY',
       xai: 'XAI_API_KEY',
       gemini: 'GEMINI_API_KEY',
+      deepseek: 'DEEPSEEK_API_KEY',
+      litellm: 'LITELLM_API_KEY',
     };
 
     // Force a fully UNCONFIGURED server (no key from env OR the saved store) — used by
@@ -647,7 +703,7 @@ class ConfigManager {
   /**
    * Check if a provider has a valid API key configured
    */
-  hasApiKey(provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai' | 'gemini' | 'local'): boolean {
+  hasApiKey(provider: ApiKeyProvider): boolean {
     const key = this.getApiKey(provider);
     return !!key && key.length > 10;
   }
@@ -655,10 +711,20 @@ class ConfigManager {
   /**
    * Remove an API key
    */
-  removeApiKey(provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai' | 'gemini' | 'local'): void {
+  removeApiKey(provider: ApiKeyProvider): void {
     const apiKeys = this.config.get('apiKeys');
     delete apiKeys[provider];
     this.config.set('apiKeys', apiKeys);
+  }
+
+  /**
+   * Check if a LiteLLM proxy is configured (base URL set via env or config)
+   */
+  hasLiteLLMProxy(): boolean {
+    const envUrl = process.env.LITELLM_BASE_URL?.trim();
+    if (envUrl) return true;
+    const storedUrl = this.config.get('litellm')?.baseUrl;
+    return !!storedUrl && storedUrl !== 'http://localhost:4000/v1';
   }
 
   /**
@@ -672,7 +738,9 @@ class ConfigManager {
     if (this.hasApiKey('anthropic')) providers.push('anthropic');
     if (this.hasApiKey('openai')) providers.push('openai');
     if (this.hasApiKey('xai')) providers.push('xai');
+    if (this.hasLiteLLMProxy()) providers.push('litellm');
     if (this.hasApiKey('gemini')) providers.push('gemini');
+    if (this.hasApiKey('deepseek')) providers.push('deepseek');
 
     // Codex uses the local Codex CLI/account auth instead of API-key storage.
     providers.push('codex');
@@ -729,11 +797,22 @@ class ConfigManager {
         baseUrl = this.config.get('xai').baseUrl;
         actualModel = model || this.config.get('xai').defaultModel;
         break;
+      case 'litellm':
+        apiKey = this.getApiKey('litellm');
+        baseUrl = process.env.LITELLM_BASE_URL?.trim() || this.config.get('litellm').baseUrl;
+        actualModel = model || process.env.LITELLM_MODEL?.trim() || this.config.get('litellm').defaultModel;
+        break;
       case 'gemini':
         // Google Gemini via its OpenAI-compatible endpoint (native tool-calling).
         apiKey = this.getApiKey('gemini');
         baseUrl = this.config.get('gemini').baseUrl;
         actualModel = model || this.config.get('gemini').defaultModel;
+        break;
+      case 'deepseek':
+        // DeepSeek native API is OpenAI-compatible.
+        apiKey = this.getApiKey('deepseek');
+        baseUrl = this.config.get('deepseek').baseUrl;
+        actualModel = model || this.config.get('deepseek').defaultModel;
         break;
       case 'codex':
         actualModel = model || this.config.get('codex').defaultModel;
@@ -784,8 +863,9 @@ class ConfigManager {
     const flag = (process.env.TEMPEST_MODEL_FALLBACK || '').trim().toLowerCase();
     if (!flag || ['0', 'false', 'off', 'no'].includes(flag)) return [];
     const chain: FallbackEntry[] = [];
-    const add = (p: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai' | 'gemini') => {
-      if (p === primary || !this.hasApiKey(p)) return;
+    const add = (p: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai' | 'gemini' | 'litellm' | 'deepseek') => {
+      if (p === primary) return;
+      if (p === 'litellm' ? !this.hasLiteLLMProxy() : !this.hasApiKey(p)) return;
       chain.push({
         provider: p,
         model: this.config.get(p).defaultModel,
@@ -795,10 +875,12 @@ class ConfigManager {
     };
     add('openrouter');
     add('venice');
+    add('litellm');
     add('anthropic');
     add('openai');
     add('xai');
     add('gemini');
+    add('deepseek');
     return chain;
   }
 
@@ -821,6 +903,18 @@ class ConfigManager {
         break;
       case 'openai':
         this.config.set('defaultModel', this.config.get('openai').defaultModel);
+        break;
+      case 'deepseek':
+        this.config.set('defaultModel', this.config.get('deepseek').defaultModel);
+        break;
+      case 'xai':
+        this.config.set('defaultModel', this.config.get('xai').defaultModel);
+        break;
+      case 'gemini':
+        this.config.set('defaultModel', this.config.get('gemini').defaultModel);
+        break;
+      case 'litellm':
+        this.config.set('defaultModel', this.config.get('litellm').defaultModel);
         break;
       case 'codex':
         this.config.set('defaultModel', this.config.get('codex').defaultModel);
@@ -847,6 +941,18 @@ class ConfigManager {
         break;
       case 'openai':
         this.config.set('openai', { ...this.config.get('openai'), defaultModel: model });
+        break;
+      case 'deepseek':
+        this.config.set('deepseek', { ...this.config.get('deepseek'), defaultModel: model });
+        break;
+      case 'xai':
+        this.config.set('xai', { ...this.config.get('xai'), defaultModel: model });
+        break;
+      case 'gemini':
+        this.config.set('gemini', { ...this.config.get('gemini'), defaultModel: model });
+        break;
+      case 'litellm':
+        this.config.set('litellm', { ...this.config.get('litellm'), defaultModel: model });
         break;
       case 'codex':
         this.config.set('codex', { ...this.config.get('codex'), defaultModel: model });
@@ -887,6 +993,8 @@ class ConfigManager {
         openai: settings.apiKeys.openai ? '***REDACTED***' : undefined,
         xai: settings.apiKeys.xai ? '***REDACTED***' : undefined,
         gemini: settings.apiKeys.gemini ? '***REDACTED***' : undefined,
+        deepseek: settings.apiKeys.deepseek ? '***REDACTED***' : undefined,
+        litellm: settings.apiKeys.litellm ? '***REDACTED***' : undefined,
       },
     };
     writeFileSync(filePath, JSON.stringify(safeSettings, null, 2));
@@ -920,9 +1028,19 @@ OPENAI_API_KEY=
 # Get your key at: https://console.x.ai/
 XAI_API_KEY=
 
+# LiteLLM Proxy (AI gateway — 100+ providers via single API)
+# Docs: https://docs.litellm.ai/docs/proxy/quick_start
+LITELLM_BASE_URL=http://localhost:4000/v1
+LITELLM_API_KEY=
+LITELLM_MODEL=gpt-4o
+
 # Google Gemini API Key (direct Gemini API via its OpenAI-compatible endpoint)
 # Get your key at: https://aistudio.google.com/apikey
 GEMINI_API_KEY=
+
+# DeepSeek API Key (direct DeepSeek API via its OpenAI-compatible endpoint)
+# Get your key at: https://platform.deepseek.com/api_keys
+DEEPSEEK_API_KEY=
 
 # Local model (Ollama / LM Studio / vLLM / llama.cpp, or any OpenAI-compatible server)
 # Point TEMPEST_LOCAL_BASE_URL at the server root (Ollama default shown below).
@@ -946,8 +1064,8 @@ TEMPEST_LOCAL_API_KEY=
 export const config = new ConfigManager();
 
 // Helper functions for quick access
-export const getApiKey = (provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai' | 'gemini') => config.getApiKey(provider);
-export const setApiKey = (provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai' | 'gemini', key: string) => config.setApiKey(provider, key);
-export const hasApiKey = (provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai' | 'gemini') => config.hasApiKey(provider);
+export const getApiKey = (provider: ApiKeyProvider) => config.getApiKey(provider);
+export const setApiKey = (provider: ApiKeyProvider, key: string) => config.setApiKey(provider, key);
+export const hasApiKey = (provider: ApiKeyProvider) => config.hasApiKey(provider);
 export const getLLMConfig = (provider?: LLMProvider, model?: string) => config.getLLMConfig(provider, model);
 export const getConfiguredProviders = () => config.getConfiguredProviders();

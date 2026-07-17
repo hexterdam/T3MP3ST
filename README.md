@@ -101,6 +101,33 @@ npm run verify-claims             # re-derives every headline from committed JSO
 
 Library/SDK usage, the full HTTP API, and MCP setup live in [docs/](docs/).
 
+### Docker
+
+Run T3MP3ST API server in a container (localhost only, not exposed externally):
+
+```bash
+cp .env.example .env       # configure API keys
+docker compose up -d       # API → http://localhost:3333
+docker compose logs -f     # view logs
+```
+
+**Security Note:** Container binds to `127.0.0.1:3333` - accessible only from localhost, not exposed to network.
+
+Test the API:
+```bash
+curl http://localhost:3333/api/health
+curl http://localhost:3333/api/bounty/platforms
+```
+
+Execute commands inside the container:
+
+```bash
+docker compose exec app npm run verify-claims
+docker compose exec app npm run cve:bench
+```
+
+Full deployment guide: [docs/DOCKER.md](docs/DOCKER.md).
+
 ## Updating from upstream
 
 If you installed from a release tarball or copied the tree instead of tracking `git pull`, use the built-in updater to sync with [github.com/elder-plinius/T3MP3ST](https://github.com/elder-plinius/T3MP3ST) without losing local secrets or bench output. It shows a numbered plan, asks **y/N** before changing anything, then runs `npm install`.
@@ -164,7 +191,7 @@ The framework is an 8-operator kill chain, and this table won't blow smoke about
 | Re-derivable measurement (`verify-claims`) | ✅ Stable | every headline recomputes from committed artifacts |
 | Recon engine | ✅ Stable | drives nmap / DNS / HTTP / fingerprinting; every finding traces to real tool output |
 | Mission engine + War Room + Op Admiral | ✅ Stable | keyless through a connected local agent |
-| Arsenal, MCP server, HTTP API | ✅ Stable | 35 built-in tools by default; 102 with the opt-in `T3MP3ST_FULL_ARSENAL` (+67 adapters, with dangerous/catalog-only drivers — metasploit, hydra, pacu, frida — behind narrow approved paths rather than generic execution) — both counts re-derive via `verify-claims`. `security_recon` over MCP |
+| Arsenal, MCP server, HTTP API | ✅ Stable | 35 built-in tools by default; 108 with the opt-in `T3MP3ST_FULL_ARSENAL` (+73 adapters, with dangerous/catalog-only drivers — metasploit, hydra, pacu, frida — behind narrow approved paths rather than generic execution) — both counts re-derive via `verify-claims`. `security_recon` over MCP |
 | Egress-scope containment | ✅ Stable (on by default) | once a mission target is set, built-in networked tools refuse off-scope public hosts — not the target/subdomains, not loopback/private (`SCOPE DENIED`) — a tightened default, not a bare tool runner |
 | Coordinated-disclosure pipeline | ✅ Stable | OSV novelty + live PoC + refuter panel + CVSS; drafts only, a human sends |
 | White-box source analysis | ⚠️ Experimental | Python-only regex ingest; multi-model decomposition costs more tokens, not fewer |
